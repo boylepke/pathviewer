@@ -1,9 +1,7 @@
 """
 pv/app.py
 ─────────
-PathViewerApp — viewer + measurement tool.
-Loads AB Dynamics .path files, displays them on a satellite map,
-and lets the user place / measure Points, Lines and Rectangles.
+PathViewerApp — viewer + measurement tool with path transform support.
 """
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -11,14 +9,15 @@ import xml.etree.ElementTree as ET
 import math
 import os
 
-from .constants  import (BG, PANEL, ACCENT, ACCENT2, TEXT, DIM,
-                          FONT_BODY, FONT_BOLD, PATH_COLORS, OBJ_ICON)
-from .geo        import latlon_to_local, heading_between, haversine
-from .models     import (new_path_dict, parse_path, item_rep, NS)
-from .styles     import apply_styles
-from .dialogs    import ask_rect_params, edit_obj
-from .sidebar    import Sidebar
-from .map_panel  import MapPanel
+from .constants import (BG, PANEL, ACCENT, ACCENT2, TEXT, DIM,
+                         FONT_BODY, FONT_BOLD, PATH_COLORS, OBJ_ICON)
+from .geo       import (local_to_latlon, latlon_to_local,
+                         heading_between, haversine)
+from .models    import (new_path_dict, parse_path, item_rep, NS)
+from .styles    import apply_styles
+from .dialogs   import ask_rect_params, edit_obj
+from .sidebar   import Sidebar
+from .map_panel import MapPanel
 
 
 class PathViewerApp:
@@ -30,10 +29,9 @@ class PathViewerApp:
         self.root.configure(bg=BG)
         self.root.minsize(900, 600)
 
-        # ── State ─────────────────────────────────────────────────────────────
         self.paths         = []
-        self.active_idx    = -1       # path selected in the list
-        self._ref_path     = None     # path used for relative-coord calculations
+        self.active_idx    = -1
+        self._ref_path     = None
         self.custom_objs   = []
         self._line_pending = None
         self._line_tmp_mk  = None
@@ -45,7 +43,6 @@ class PathViewerApp:
 
     # ── UI ────────────────────────────────────────────────────────────────────
     def _build_ui(self):
-        # Toolbar
         tb = tk.Frame(self.root, bg=BG, height=46)
         tb.pack(fill="x"); tb.pack_propagate(False)
         tk.Label(tb, text="⬡  KENGURU PATH TOOLS", bg=BG, fg=ACCENT,
@@ -59,14 +56,13 @@ class PathViewerApp:
                  bg=BG, fg=DIM, font=FONT_BODY).pack(side="right", padx=14)
         tk.Frame(self.root, bg=ACCENT2, height=1).pack(fill="x")
 
-        # Paned layout
         pane = tk.PanedWindow(self.root, orient="horizontal", bg=BG,
                               sashwidth=4, sashrelief="flat",
                               sashpad=0, handlesize=0)
         pane.pack(fill="both", expand=True)
-        sb_host  = tk.Frame(pane, bg=PANEL, width=330)
+        sb_host  = tk.Frame(pane, bg=PANEL, width=340)
         map_host = tk.Frame(pane, bg=BG)
-        pane.add(sb_host,  minsize=280)
+        pane.add(sb_host,  minsize=290)
         pane.add(map_host, minsize=480)
 
         self.sidebar   = Sidebar(sb_host)
@@ -75,9 +71,6 @@ class PathViewerApp:
 
     def _wire_events(self):
         sb = self.sidebar
-        mp = self.map_panel
-
-        # Path list buttons
         sb.btn_add.config(   command=self.add_file)
         sb.btn_toggle.config(command=self._toggle_visibility)
         sb.btn_remove.config(command=self._remove_path)
@@ -85,12 +78,12 @@ class PathViewerApp:
         sb.path_tv.bind("<<TreeviewSelect>>", self._on_path_select)
         sb.path_tv.bind("<Double-1>",          self._toggle_visibility)
 
-        # Object type dropdown
+        sb.btn_apply_transform.config(command=self._apply_transform)
+        sb.btn_reset_transform.config(command=self._reset_transform)
+
         sb.obj_type_var.trace_add("write",
             lambda *_: self._on_obj_type_change(sb.obj_type_var.get()))
         sb.btn_cancel_line.config(command=self._cancel_line_pending)
-
-        # Object buttons + table
         sb.btn_edit_obj.config(  command=self._edit_obj_btn)
         sb.btn_move_obj.config(  command=self._start_move_mode)
         sb.btn_remove_obj.config(command=self._remove_obj)
@@ -98,11 +91,10 @@ class PathViewerApp:
         sb.meas_tv.bind("<<TreeviewSelect>>", self._on_meas_select)
         sb.meas_tv.bind("<Double-1>",          self._edit_obj_table)
 
-        # Map right-click
-        mp.map_w.add_right_click_menu_command(
+        self.map_panel.map_w.add_right_click_menu_command(
             "📐  Add object here",
             self._rcm_add_obj, pass_coords=True)
-        mp.map_w.add_right_click_menu_command(
+        self.map_panel.map_w.add_right_click_menu_command(
             "✥   Move selected object here",
             self._rcm_move_obj, pass_coords=True)
 
@@ -115,33 +107,33 @@ class PathViewerApp:
     def _all_items(self):
         items = []
         for pd in self.paths:
-            if pd["visible"]:
-                items.extend(pd["keypoints"])
+            if pd["visible"]: items.extend(pd["keypoints"])
         items.extend(self.custom_objs)
         return items
 
     def _get_ref_path(self):
         name = self.sidebar.ref_origin_var.get()
         for pd in self.paths:
-            if pd["name"] == name:
-                return pd
+            if pd["name"] == name: return pd
         return self.paths[0] if self.paths else None
+
+    def _active_pd(self):
+        if 0 <= self.active_idx < len(self.paths):
+            return self.paths[self.active_idx]
+        return None
 
     # ── File loading ──────────────────────────────────────────────────────────
     def _pick_file(self):
         return filedialog.askopenfilename(
             title="Open AB Dynamics .path file",
             filetypes=[("Path files","*.path"),
-                       ("XML files", "*.xml"),
-                       ("All files", "*.*")])
+                       ("XML files","*.xml"),("All files","*.*")])
 
     def open_file(self):
         fp = self._pick_file()
         if not fp: return
-        for pd in self.paths:
-            self.map_panel.erase_path(pd)
-        self.paths.clear()
-        self.active_idx = -1
+        for pd in self.paths: self.map_panel.erase_path(pd)
+        self.paths.clear(); self.active_idx = -1
         self.sidebar.refresh_path_list([], -1)
         self._load_path(fp, fit=True)
 
@@ -154,7 +146,6 @@ class PathViewerApp:
             xml_tree = ET.parse(filepath)
         except Exception as exc:
             messagebox.showerror("Parse error", str(exc)); return
-
         color = PATH_COLORS[len(self.paths) % len(PATH_COLORS)]
         pd    = new_path_dict(filepath, xml_tree, color)
         parse_path(pd)
@@ -162,33 +153,26 @@ class PathViewerApp:
         self.active_idx = len(self.paths) - 1
 
         self.sidebar.refresh_path_list(self.paths, self.active_idx)
-        self.sidebar.show_path_origin(pd)
+        self.sidebar.show_path_fields(pd)
 
-        # Rebuild reference-origin dropdown
         cur = self.sidebar.ref_origin_var.get()
-        self.sidebar.rebuild_ref_menu(
-            self.paths, cur, self._on_ref_origin_change)
-        if self._ref_path is None:
-            self._ref_path = pd
+        self.sidebar.rebuild_ref_menu(self.paths, cur, self._on_ref_origin_change)
+        if self._ref_path is None: self._ref_path = pd
         self.sidebar.show_ref_coords(self._ref_path)
 
         self.map_panel.draw_path(pd)
         self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
-
         if fit:
             self.map_panel.fit_to_coords(
                 [(kp["lat"], kp["lon"]) for kp in pd["keypoints"]])
-
-        self._set_status(
-            f"{len(self.paths)} path(s) loaded  |  {pd['name']}")
+        self._set_status(f"{len(self.paths)} path(s) loaded  |  {pd['name']}")
 
     def _on_ref_origin_change(self, name):
         for pd in self.paths:
             if pd["name"] == name:
-                self._ref_path = pd
-                break
+                self._ref_path = pd; break
         self.sidebar.show_ref_coords(self._ref_path)
-        self._update_details()   # recalculate displayed coords
+        self._update_details()
 
     # ── Path list management ──────────────────────────────────────────────────
     def _on_path_select(self, _e=None):
@@ -198,7 +182,7 @@ class PathViewerApp:
         except (ValueError, IndexError): return
         if 0 <= idx < len(self.paths):
             self.active_idx = idx
-            self.sidebar.show_path_origin(self.paths[idx])
+            self.sidebar.show_path_fields(self.paths[idx])
 
     def _toggle_visibility(self, _e=None):
         sel = self.sidebar.path_tv.selection()
@@ -207,10 +191,8 @@ class PathViewerApp:
         except (ValueError, IndexError): return
         pd = self.paths[idx]
         pd["visible"] = not pd["visible"]
-        if pd["visible"]:
-            self.map_panel.draw_path(pd)
-        else:
-            self.map_panel.erase_path(pd)
+        (self.map_panel.draw_path if pd["visible"] else
+         self.map_panel.erase_path)(pd)
         self.sidebar.refresh_path_list(self.paths, self.active_idx)
         self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
 
@@ -230,14 +212,74 @@ class PathViewerApp:
         self.sidebar.show_ref_coords(self._get_ref_path())
         self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
         if self.active_idx >= 0:
-            self.sidebar.show_path_origin(self.paths[self.active_idx])
+            self.sidebar.show_path_fields(self.paths[self.active_idx])
         else:
-            self.sidebar.clear_path_origin()
+            self.sidebar.clear_path_fields()
         self._set_status(
             f"{len(self.paths)} path(s) loaded" if self.paths else "No file loaded")
 
     def _fit_all(self):
         self.map_panel.fit_to_all_paths(self.paths)
+
+    # ── Path transform ────────────────────────────────────────────────────────
+    def _apply_transform(self):
+        pd = self._active_pd()
+        if pd is None:
+            messagebox.showwarning("No path selected",
+                                   "Select a path in the list first.")
+            return
+        sb = self.sidebar
+        try:
+            # 1. Direct origin edit
+            pd["lat0"]    = float(sb.var_sel_lat.get())
+            pd["lon0"]    = float(sb.var_sel_lon.get())
+            pd["bearing"] = float(sb.var_sel_bearing.get())
+            pd["alt0"]    = float(sb.var_sel_alt.get())
+
+            # 2. Incremental shift (ΔX, ΔY in the path's local frame)
+            dx = float(sb.var_dx.get())
+            dy = float(sb.var_dy.get())
+            if dx != 0 or dy != 0:
+                pd["lat0"], pd["lon0"] = local_to_latlon(
+                    dx, dy, pd["lat0"], pd["lon0"], pd["bearing"])
+
+            # 3. Incremental rotation around origin
+            dbrg = float(sb.var_dbrg.get())
+            if dbrg != 0:
+                pd["bearing"] = (pd["bearing"] + dbrg) % 360.0
+
+        except ValueError:
+            messagebox.showerror("Invalid value",
+                                 "All transform fields must be numbers.")
+            return
+
+        # Refresh display fields (shows updated values, clears deltas)
+        self.sidebar.show_path_fields(pd)
+
+        # Redraw path + update reference coords if this is the ref
+        self.map_panel.draw_path(pd)
+        self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
+        if self._ref_path and self._ref_path["name"] == pd["name"]:
+            self.sidebar.show_ref_coords(pd)
+        self._update_details()
+        self._set_status(
+            f"{pd['name']} — origin updated  "
+            f"({pd['lat0']:.6f}°, {pd['lon0']:.6f}°  brg {pd['bearing']:.2f}°)")
+
+    def _reset_transform(self):
+        pd = self._active_pd()
+        if pd is None: return
+        pd["lat0"]    = pd["orig_lat0"]
+        pd["lon0"]    = pd["orig_lon0"]
+        pd["alt0"]    = pd["orig_alt0"]
+        pd["bearing"] = pd["orig_bearing"]
+        self.sidebar.show_path_fields(pd)
+        self.map_panel.draw_path(pd)
+        self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
+        if self._ref_path and self._ref_path["name"] == pd["name"]:
+            self.sidebar.show_ref_coords(pd)
+        self._update_details()
+        self._set_status(f"{pd['name']} — reset to original file values")
 
     # ── Object type selection ─────────────────────────────────────────────────
     _OBJ_HINTS = {
@@ -392,16 +434,13 @@ class PathViewerApp:
         sel  = self.sidebar.meas_tv.selection()
         if not sel:
             messagebox.showinfo("Nothing selected",
-                                "Select a custom object first.")
-            return
+                                "Select a custom object first."); return
         rows = list(self.sidebar.meas_tv.get_children())
         i    = rows.index(sel[0])
-        n_kp = self._n_kp()
-        if i < n_kp:
+        if i < self._n_kp():
             messagebox.showinfo("Path keypoint",
-                                "Path keypoints cannot be moved here.")
-            return
-        self._sel_obj_idx = i - n_kp
+                                "Path keypoints cannot be moved here."); return
+        self._sel_obj_idx = i - self._n_kp()
         self._set_status(
             f"Move mode — right-click map to place  "
             f"'{self.custom_objs[self._sel_obj_idx]['name']}'")
@@ -424,8 +463,7 @@ class PathViewerApp:
         self._update_details()
 
     def _clear_custom_objs(self):
-        for obj in self.custom_objs:
-            self.map_panel.erase_obj(obj)
+        for obj in self.custom_objs: self.map_panel.erase_obj(obj)
         self.custom_objs.clear()
         self._sel_obj_idx = None
         self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
@@ -433,7 +471,7 @@ class PathViewerApp:
             "—  select an object for coordinates\n"
             "—  select two for distance", DIM)
 
-    # ── Details / distance panel ──────────────────────────────────────────────
+    # ── Details panel ─────────────────────────────────────────────────────────
     def _on_meas_select(self, _e=None):
         self._update_details()
 
@@ -444,49 +482,41 @@ class PathViewerApp:
         ref   = self._get_ref_path()
 
         def _rel(lat, lon):
-            """Relative X/Y string, or empty if no reference."""
-            if ref is None:
-                return ""
-            x, y = latlon_to_local(lat, lon,
-                                   ref["lat0"], ref["lon0"], ref["bearing"])
+            if ref is None: return ""
+            x, y = latlon_to_local(
+                lat, lon, ref["lat0"], ref["lon0"], ref["bearing"])
             return (f"\n  X = {x:+.3f} m     Y = {y:+.3f} m"
                     f"\n  (ref: {ref['name']})")
 
-        # ── 0 selected ────────────────────────────────────────────────────────
         if len(sel) == 0:
             self.sidebar.show_details(
                 "—  select an object for coordinates\n"
                 "—  select two for distance", DIM)
             return
 
-        # ── 1 selected ────────────────────────────────────────────────────────
         if len(sel) == 1:
             i = rows.index(sel[0])
             if i >= len(items): return
             it  = items[i]
             lat, lon = item_rep(it)
-            name = it.get("name", "?")
+            name = it.get("name","?")
             icon = OBJ_ICON.get(it.get("type",""), "■")
             lines = [f"{icon}  {name}",
                      f"  Lat  {lat:.6f}°",
                      f"  Lon  {lon:.6f}°"]
-
-            # extra per-type info
             t = it.get("type")
             if t == "line":
-                d   = haversine(it["lat1"],it["lon1"],it["lat2"],it["lon2"])
+                d = haversine(it["lat1"],it["lon1"],it["lat2"],it["lon2"])
                 lines.append(f"  L = {d:.3f} m   hdg {it.get('heading',0):.1f}°")
             elif t == "rect":
                 lines.append(
                     f"  {it['width_m']:.2f} × {it['height_m']:.2f} m"
                     f"   hdg {it.get('heading',0):.1f}°")
-
             lines.append(_rel(lat, lon))
             self.sidebar.show_details(
                 "\n".join(l for l in lines if l), ACCENT, FONT_BODY)
             return
 
-        # ── 2 selected ────────────────────────────────────────────────────────
         if len(sel) == 2:
             idx = [rows.index(s) for s in sel]
             if any(i >= len(items) for i in idx): return
@@ -494,10 +524,8 @@ class PathViewerApp:
             la1, lo1 = item_rep(it1)
             la2, lo2 = item_rep(it2)
             geo_d    = haversine(la1, lo1, la2, lo2)
-
             lines = [f"{it1.get('name','?')}  ↔  {it2.get('name','?')}",
                      f"  Geo distance :  {geo_d:.3f} m"]
-
             if ref:
                 x1,y1 = latlon_to_local(la1,lo1,ref["lat0"],ref["lon0"],ref["bearing"])
                 x2,y2 = latlon_to_local(la2,lo2,ref["lat0"],ref["lon0"],ref["bearing"])
@@ -505,10 +533,8 @@ class PathViewerApp:
                 lines += [f"  Local XY dist:  {ld:.3f} m",
                           f"  ΔX = {x2-x1:+.3f} m   ΔY = {y2-y1:+.3f} m",
                           f"  (ref: {ref['name']})"]
-
             self.sidebar.show_details("\n".join(lines), ACCENT, FONT_BOLD)
             return
 
-        # ── > 2 selected ──────────────────────────────────────────────────────
         self.sidebar.show_details(
             f"{len(sel)} objects selected — select exactly 2 to measure", DIM)

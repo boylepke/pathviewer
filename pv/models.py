@@ -27,10 +27,16 @@ def new_path_dict(filepath, xml_tree, color):
         "visible":            True,
         "name":               "",
         "schema":             "",
+        # current (editable) origin
         "lat0":               0.0,
         "lon0":               0.0,
         "alt0":               0.0,
         "bearing":            0.0,
+        # original values from file — used by Reset
+        "orig_lat0":          0.0,
+        "orig_lon0":          0.0,
+        "orig_alt0":          0.0,
+        "orig_bearing":       0.0,
         "origin_node":        "",
         "start_time_offset":  "0",
         "sync_code":          "0",
@@ -57,6 +63,11 @@ def parse_path(pd):
     pd["lon0"]    = float(od.get("longitude"))
     pd["alt0"]    = float(od.get("altitude"))
     pd["bearing"] = float(od.get("bearing"))
+    # snapshot originals so Reset always works
+    pd["orig_lat0"]    = pd["lat0"]
+    pd["orig_lon0"]    = pd["lon0"]
+    pd["orig_alt0"]    = pd["alt0"]
+    pd["orig_bearing"] = pd["bearing"]
 
     pd["segments"] = []
     for seg_el in root.findall(_n("SegmentList") + "/" + _n("Segment")):
