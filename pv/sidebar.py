@@ -1,18 +1,31 @@
 """
 pv/sidebar.py
 ─────────────
-Sidebar class: builds the scrollable left panel and exposes all widgets
-and refresh methods. Contains zero application logic.
+Simplified sidebar: path viewer + measurement tool only.
 
-Public attributes (available after __init__):
-  StringVars (editable) : var_lat, var_lon, var_alt, var_bearing,
-                          var_time_offset, var_sync, var_spd_ov
-  StringVars (display)  : lbl_schema, lbl_onode, lbl_spd_ms, lbl_spd_kph
-  Labels                : lbl_editing, lbl_dist  (use .config() to update)
-  Treeviews             : path_tv, seg_tv, meas_tv
-  Object-type controls  : obj_type_var, lbl_obj_hint, btn_cancel_line
-  Path-list buttons     : btn_add, btn_toggle, btn_remove, btn_fit
-  Object buttons        : btn_edit_obj, btn_move_obj, btn_remove_obj, btn_clear_objs
+Sections
+────────
+1. LOADED PATHS     – list with toggle/remove; selected path's origin read-out
+2. REFERENCE ORIGIN – choose which path origin is used for relative coords
+3. MEASUREMENT OBJECTS – add / edit / remove Points, Lines, Rectangles
+4. DETAILS          – 0 sel → hint  |  1 sel → abs + rel coords  |  2 sel → distance
+
+Public attributes (all set during __init__)
+───────────────────────────────────────────
+  path_tv                    ttk.Treeview
+  btn_add, btn_toggle,
+    btn_remove, btn_fit       ttk.Button
+  lbl_sel_name, lbl_sel_lat,
+    lbl_sel_lon, lbl_sel_brg,
+    lbl_sel_alt               ttk.Label  (selected path origin read-out)
+  ref_origin_var             tk.StringVar  (dropdown)
+  lbl_ref_coords             ttk.Label  (ref origin coords)
+  obj_type_var               tk.StringVar
+  lbl_obj_hint, btn_cancel_line
+  meas_tv                    ttk.Treeview
+  btn_edit_obj, btn_move_obj,
+    btn_remove_obj,btn_clear_objs   ttk.Button
+  lbl_details                ttk.Label  (adaptive details/distance panel)
 """
 import tkinter as tk
 from tkinter import ttk
@@ -45,8 +58,9 @@ class Sidebar:
         f = self._frame
         p = dict(padx=12, pady=2)
 
-        # ── LOADED PATHS ──────────────────────────────────────────────────────
+        # ── 1. LOADED PATHS ───────────────────────────────────────────────────
         self._sec(f, "LOADED PATHS")
+
         self.path_tv = ttk.Treeview(f, columns=("clr","name","vis"),
                                      show="headings", height=4,
                                      selectmode="browse")
@@ -66,60 +80,62 @@ class Sidebar:
         for btn in (self.btn_add, self.btn_toggle, self.btn_remove, self.btn_fit):
             btn.pack(side="left", padx=2)
 
-        self.lbl_editing = ttk.Label(f, text="— no path selected —",
-                                      style="Dim.TLabel")
-        self.lbl_editing.pack(anchor="w", padx=12, pady=(6,0))
+        # Selected path origin read-out (read-only)
+        orig = ttk.Frame(f, style="Card.TFrame")
+        orig.pack(fill="x", padx=12, pady=(2,4))
+        self.lbl_sel_name = ttk.Label(orig, text="— no path selected —",
+                                       style="Dim.TLabel",
+                                       font=("Consolas",8,"bold"))
+        self.lbl_sel_name.pack(anchor="w", padx=8, pady=(4,2))
+        grid = ttk.Frame(orig); grid.pack(fill="x", padx=8, pady=(0,4))
+        self.lbl_sel_lat = self._ro_pair(grid, "Lat",     0, 0)
+        self.lbl_sel_lon = self._ro_pair(grid, "Lon",     0, 2)
+        self.lbl_sel_brg = self._ro_pair(grid, "Bearing", 1, 0)
+        self.lbl_sel_alt = self._ro_pair(grid, "Alt (m)", 1, 2)
 
-        # ── ORIGIN DATUM ──────────────────────────────────────────────────────
-        self._sec(f, "ORIGIN DATUM")
-        self.var_lat     = self._field(f, "Latitude   (°N)")
-        self.var_lon     = self._field(f, "Longitude  (°E)")
-        self.var_alt     = self._field(f, "Altitude     (m)")
-        self.var_bearing = self._field(f, "Bearing      (°)")
+        # ── 2. REFERENCE ORIGIN ───────────────────────────────────────────────
+        self._sec(f, "REFERENCE ORIGIN")
+        ttk.Label(f, text="Relative coords computed from:",
+                  style="Dim.TLabel").pack(anchor="w", padx=12, pady=(0,2))
 
-        # ── HEADER PARAMS ─────────────────────────────────────────────────────
-        self._sec(f, "HEADER PARAMS")
-        self.lbl_schema      = self._kv(f, "Schema")
-        self.lbl_onode       = self._kv(f, "Origin node")
-        self.var_time_offset = self._field(f, "Start time offset")
-        self.var_sync        = self._field(f, "Sync code")
+        self.ref_origin_var = tk.StringVar(value="— none —")
+        self._ref_om_frame = ttk.Frame(f)
+        self._ref_om_frame.pack(fill="x", padx=12, pady=(0,4))
+        self._ref_om = tk.OptionMenu(self._ref_om_frame, self.ref_origin_var,
+                                      "— none —")
+        self._ref_om.config(bg=CARD, fg=TEXT, activebackground=BORDER,
+                             activeforeground=TEXT, font=FONT_BODY,
+                             relief="flat", bd=0, highlightthickness=0,
+                             width=28)
+        self._ref_om["menu"].config(bg=CARD, fg=TEXT, activebackground=ACCENT2)
+        self._ref_om.pack(side="left")
 
-        # ── TARGET SPEED ──────────────────────────────────────────────────────
-        self._sec(f, "TARGET SPEED")
-        self.lbl_spd_ms  = self._kv(f, "Cruise (m/s)")
-        self.lbl_spd_kph = self._kv(f, "Cruise (km/h)")
-        self.var_spd_ov  = self._field(f, "Override (km/h)")
+        self.lbl_ref_coords = ttk.Label(f, text="",
+                                         style="Dim.TLabel", wraplength=290)
+        self.lbl_ref_coords.pack(anchor="w", padx=12, pady=(0,4))
 
-        # ── SEGMENTS ──────────────────────────────────────────────────────────
-        self._sec(f, "SEGMENTS  (double-click to edit)")
-        self.seg_tv = ttk.Treeview(f, columns=("tp","len","ev"),
-                                    show="headings", height=6,
-                                    selectmode="browse")
-        for col, hd, w in [("tp","Type",68),("len","Length (m)",80),
-                            ("ev","End v (km/h)",90)]:
-            self.seg_tv.heading(col, text=hd)
-            self.seg_tv.column(col, width=w, anchor="center", stretch=False)
-        self.seg_tv.pack(fill="x", **p)
-
-        # ── MEASUREMENT OBJECTS ───────────────────────────────────────────────
+        # ── 3. MEASUREMENT OBJECTS ────────────────────────────────────────────
         self._sec(f, "MEASUREMENT OBJECTS")
+
         top = ttk.Frame(f); top.pack(fill="x", padx=12, pady=(4,2))
         ttk.Label(top, text="Add:", style="Dim.TLabel").pack(side="left")
         self.obj_type_var = tk.StringVar(value="Point")
-        om = tk.OptionMenu(top, self.obj_type_var, "Point", "Line", "Rectangle")
-        om.config(bg=CARD, fg=TEXT, activebackground=BORDER, activeforeground=TEXT,
-                  font=FONT_BODY, relief="flat", bd=0, highlightthickness=0, width=10)
+        om = tk.OptionMenu(top, self.obj_type_var,
+                           "Point", "Line", "Rectangle")
+        om.config(bg=CARD, fg=TEXT, activebackground=BORDER,
+                  activeforeground=TEXT, font=FONT_BODY,
+                  relief="flat", bd=0, highlightthickness=0, width=10)
         om["menu"].config(bg=CARD, fg=TEXT, activebackground=ACCENT2)
         om.pack(side="left", padx=6)
         self.lbl_obj_hint = ttk.Label(top, text="right-click map",
                                        style="Dim.TLabel")
         self.lbl_obj_hint.pack(side="left")
-        self.btn_cancel_line = ttk.Button(top, text="✕ Cancel line",
+        self.btn_cancel_line = ttk.Button(top, text="✕ Cancel",
                                            command=lambda: None)
-        # not packed until a line is pending
+        # not packed until line is pending
 
         self.meas_tv = ttk.Treeview(f, columns=("typ","name","info"),
-                                     show="headings", height=7,
+                                     show="headings", height=8,
                                      selectmode="extended")
         self.meas_tv.heading("typ",  text="")
         self.meas_tv.heading("name", text="Name")
@@ -131,81 +147,48 @@ class Sidebar:
 
         mr = ttk.Frame(f); mr.pack(fill="x", padx=12, pady=2)
         self.btn_edit_obj   = ttk.Button(mr, text="✏ Edit",       command=lambda: None)
-        self.btn_move_obj   = ttk.Button(mr, text="✥ Move on map",command=lambda: None)
+        self.btn_move_obj   = ttk.Button(mr, text="✥ Move",       command=lambda: None)
         self.btn_remove_obj = ttk.Button(mr, text="🗑 Remove",     command=lambda: None)
-        self.btn_clear_objs = ttk.Button(mr, text="Clear custom", command=lambda: None)
+        self.btn_clear_objs = ttk.Button(mr, text="Clear all",    command=lambda: None)
         for btn in (self.btn_edit_obj, self.btn_move_obj,
                     self.btn_remove_obj, self.btn_clear_objs):
             btn.pack(side="left", padx=2)
 
-        # ── DISTANCE RESULT ───────────────────────────────────────────────────
-        self._sec(f, "DISTANCE RESULT")
-        self.lbl_dist = ttk.Label(f, text="—  select 2 objects above  —",
-                                   style="Dim.TLabel", wraplength=300,
-                                   justify="left")
-        self.lbl_dist.pack(anchor="w", padx=12, pady=4)
+        # ── 4. DETAILS ────────────────────────────────────────────────────────
+        self._sec(f, "DETAILS")
+        self.lbl_details = ttk.Label(
+            f,
+            text="—  select an object for coordinates\n"
+                 "—  select two for distance",
+            style="Dim.TLabel",
+            wraplength=300, justify="left")
+        self.lbl_details.pack(anchor="w", padx=12, pady=6)
 
     # ── Private layout helpers ────────────────────────────────────────────────
     def _sec(self, parent, title):
-        row = ttk.Frame(parent); row.pack(fill="x", padx=8, pady=(10,1))
+        row = ttk.Frame(parent); row.pack(fill="x", padx=8, pady=(12,1))
         ttk.Label(row, text=title, style="H.TLabel").pack(side="left")
         tk.Frame(row, bg=BORDER, height=1).pack(side="left", fill="x",
                                                   expand=True, padx=6)
 
-    def _kv(self, parent, key):
-        row = ttk.Frame(parent); row.pack(fill="x", padx=12, pady=1)
-        ttk.Label(row, text=key+":", style="Dim.TLabel",
-                  width=20, anchor="w").pack(side="left")
-        var = tk.StringVar(value="—")
-        ttk.Label(row, textvariable=var, anchor="w").pack(side="left")
-        return var
-
-    def _field(self, parent, key):
-        row = ttk.Frame(parent); row.pack(fill="x", padx=12, pady=1)
-        ttk.Label(row, text=key+":", style="Dim.TLabel",
-                  width=20, anchor="w").pack(side="left")
-        var = tk.StringVar()
-        ttk.Entry(row, textvariable=var, width=18, font=FONT_BODY).pack(side="left")
-        return var
+    def _ro_pair(self, grid, label, row, col):
+        """Add a read-only label-value pair in a grid. Returns the value Label."""
+        ttk.Label(grid, text=label+":", style="Dim.TLabel",
+                  width=9, anchor="w").grid(row=row, column=col,
+                                             sticky="w", padx=(0,2))
+        lbl = ttk.Label(grid, text="—", anchor="w", font=FONT_BODY)
+        lbl.grid(row=row, column=col+1, sticky="w", padx=(0,10))
+        return lbl
 
     # ── Public display-update API ─────────────────────────────────────────────
-    def set_editing_label(self, name, color):
-        self.lbl_editing.config(text=f"✎  Editing:  {name}", foreground=color)
-
     def set_obj_hint(self, text):
         self.lbl_obj_hint.config(text=text)
 
-    def set_dist_result(self, text, color, font):
-        self.lbl_dist.config(text=text, foreground=color, font=font)
-
-    def populate_path_fields(self, pd):
-        """Fill all editable fields from a path dict."""
-        self.set_editing_label(pd["name"], pd["color"])
-        self.lbl_schema.set(pd["schema"])
-        self.lbl_onode.set(pd["origin_node"])
-        self.var_lat.set(f"{pd['lat0']:.8f}")
-        self.var_lon.set(f"{pd['lon0']:.8f}")
-        self.var_alt.set(f"{pd['alt0']:.3f}")
-        self.var_bearing.set(f"{pd['bearing']:.5f}")
-        self.var_time_offset.set(pd["start_time_offset"])
-        self.var_sync.set(pd["sync_code"])
-        speeds = [s["velocity"] for s in pd["segments"] if s["velocity"] > 0]
-        cruise = max(speeds) if speeds else 0.0
-        self.lbl_spd_ms.set(f"{cruise:.4f}")
-        self.lbl_spd_kph.set(f"{cruise*3.6:.3f}")
-        self.var_spd_ov.set(f"{cruise*3.6:.3f}")
-        self.refresh_seg_table(pd["segments"])
-
-    def clear_path_fields(self):
-        self.lbl_editing.config(text="— no path selected —", foreground=DIM)
-        for v in [self.var_lat, self.var_lon, self.var_alt, self.var_bearing,
-                  self.var_time_offset, self.var_sync, self.var_spd_ov]:
-            v.set("")
-        for kv in [self.lbl_schema, self.lbl_onode,
-                   self.lbl_spd_ms, self.lbl_spd_kph]:
-            kv.set("—")
-        for row in self.seg_tv.get_children():
-            self.seg_tv.delete(row)
+    def show_details(self, text, color=None, font=None):
+        kw = dict(text=text)
+        if color: kw["foreground"] = color
+        if font:  kw["font"]       = font
+        self.lbl_details.config(**kw)
 
     def refresh_path_list(self, paths, active_idx):
         for row in self.path_tv.get_children():
@@ -221,16 +204,50 @@ class Sidebar:
             self.path_tv.selection_set(f"p{active_idx}")
             self.path_tv.see(f"p{active_idx}")
 
-    def refresh_seg_table(self, segments):
-        for row in self.seg_tv.get_children():
-            self.seg_tv.delete(row)
-        for s in segments:
-            ln  = f"{s['length']:.2f}" if s["length"] is not None else "—"
-            ev  = f"{s['end_velocity']*3.6:.3f}"
-            tag = "stop" if s["type"] == "Stop" else "str8"
-            self.seg_tv.insert("", "end", values=(s["type"], ln, ev), tags=(tag,))
-        self.seg_tv.tag_configure("stop", foreground=RED)
-        self.seg_tv.tag_configure("str8", foreground=GREEN)
+    def show_path_origin(self, pd):
+        self.lbl_sel_name.config(text=pd["name"], foreground=pd["color"])
+        self.lbl_sel_lat.config(text=f"{pd['lat0']:.6f}°")
+        self.lbl_sel_lon.config(text=f"{pd['lon0']:.6f}°")
+        self.lbl_sel_brg.config(text=f"{pd['bearing']:.2f}°")
+        self.lbl_sel_alt.config(text=f"{pd['alt0']:.1f}")
+
+    def clear_path_origin(self):
+        self.lbl_sel_name.config(text="— no path selected —",
+                                  foreground=DIM)
+        for lbl in (self.lbl_sel_lat, self.lbl_sel_lon,
+                    self.lbl_sel_brg, self.lbl_sel_alt):
+            lbl.config(text="—")
+
+    def rebuild_ref_menu(self, paths, current_name, on_change):
+        """Rebuild the reference-origin dropdown from the current path list."""
+        menu = self._ref_om["menu"]
+        menu.delete(0, "end")
+        if not paths:
+            menu.add_command(label="— none —",
+                             command=lambda: self.ref_origin_var.set("— none —"))
+            self.ref_origin_var.set("— none —")
+            return
+        for pd in paths:
+            name = pd["name"]
+            menu.add_command(label=name,
+                             command=lambda n=name: (
+                                 self.ref_origin_var.set(n), on_change(n)))
+        # keep current selection if still valid, else default to first
+        names = [pd["name"] for pd in paths]
+        if current_name in names:
+            self.ref_origin_var.set(current_name)
+        else:
+            self.ref_origin_var.set(names[0])
+            on_change(names[0])
+
+    def show_ref_coords(self, pd):
+        if pd is None:
+            self.lbl_ref_coords.config(text="")
+            return
+        self.lbl_ref_coords.config(
+            text=f"Lat {pd['lat0']:.6f}°   "
+                 f"Lon {pd['lon0']:.6f}°   "
+                 f"Brg {pd['bearing']:.2f}°")
 
     def refresh_meas_table(self, paths, custom_objs):
         for row in self.meas_tv.get_children():
