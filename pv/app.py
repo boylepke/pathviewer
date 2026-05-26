@@ -1,7 +1,10 @@
 """
 pv/app.py
 ─────────
-PathViewerApp — viewer + measurement tool with path transform support.
+PathViewerApp — viewer + object placement + two-way distance measurement.
+
+Measurement Way 1: select 2 rows from the measurement table → distance shown.
+Measurement Way 2: "Pick on map" mode → left-click A, left-click B → distance.
 """
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -25,17 +28,27 @@ class PathViewerApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Path Viewer  —  Kenguru Tools")
-        self.root.geometry("1440x860")
+        self.root.geometry("1440x900")
         self.root.configure(bg=BG)
         self.root.minsize(900, 600)
 
-        self.paths         = []
-        self.active_idx    = -1
-        self._ref_path     = None
-        self.custom_objs   = []
+        # ── Path state ────────────────────────────────────────────────────────
+        self.paths       = []
+        self.active_idx  = -1
+        self._ref_path   = None
+
+        # ── Object state ──────────────────────────────────────────────────────
+        self.custom_objs  = []
         self._line_pending = None
         self._line_tmp_mk  = None
-        self._sel_obj_idx  = None
+        self._sel_obj_idx  = None   # armed for "move here"
+
+        # ── Measurement Way 2 state ───────────────────────────────────────────
+        self._meas_mode  = False    # True = picking mode active
+        self._meas_a     = None     # (lat, lon) of point A, or None
+        self._meas_b     = None     # (lat, lon) of point B, or None
+        self._meas_mk_a  = None     # map marker for A
+        self._meas_mk_b  = None     # map marker for B
 
         apply_styles(self.root)
         self._build_ui()
@@ -48,7 +61,8 @@ class PathViewerApp:
         tk.Label(tb, text="⬡  KENGURU PATH TOOLS", bg=BG, fg=ACCENT,
                  font=("Consolas", 12, "bold")).pack(side="left", padx=14)
         for txt, cmd in [("📂  Open .path", self.open_file),
-                         ("📂+  Add .path",  self.add_file)]:
+                         ("📂+  Add .path",  self.add_file),
+                         ("🗑   Reset map",   self.reset_map)]:
             ttk.Button(tb, text=txt, command=cmd,
                        style="Accent.TButton").pack(side="left", padx=4, pady=6)
         self._status = tk.StringVar(value="No file loaded")
@@ -60,7 +74,7 @@ class PathViewerApp:
                               sashwidth=4, sashrelief="flat",
                               sashpad=0, handlesize=0)
         pane.pack(fill="both", expand=True)
-        sb_host  = tk.Frame(pane, bg=PANEL, width=340)
+        sb_host  = tk.Frame(pane, bg=PANEL, width=345)
         map_host = tk.Frame(pane, bg=BG)
         pane.add(sb_host,  minsize=290)
         pane.add(map_host, minsize=480)
@@ -71,6 +85,8 @@ class PathViewerApp:
 
     def _wire_events(self):
         sb = self.sidebar
+
+        # Path list
         sb.btn_add.config(   command=self.add_file)
         sb.btn_toggle.config(command=self._toggle_visibility)
         sb.btn_remove.config(command=self._remove_path)
@@ -78,9 +94,11 @@ class PathViewerApp:
         sb.path_tv.bind("<<TreeviewSelect>>", self._on_path_select)
         sb.path_tv.bind("<Double-1>",          self._toggle_visibility)
 
+        # Transform
         sb.btn_apply_transform.config(command=self._apply_transform)
         sb.btn_reset_transform.config(command=self._reset_transform)
 
+        # Object controls
         sb.obj_type_var.trace_add("write",
             lambda *_: self._on_obj_type_change(sb.obj_type_var.get()))
         sb.btn_cancel_line.config(command=self._cancel_line_pending)
@@ -88,15 +106,26 @@ class PathViewerApp:
         sb.btn_move_obj.config(  command=self._start_move_mode)
         sb.btn_remove_obj.config(command=self._remove_obj)
         sb.btn_clear_objs.config(command=self._clear_custom_objs)
-        sb.meas_tv.bind("<<TreeviewSelect>>", self._on_meas_select)
-        sb.meas_tv.bind("<Double-1>",          self._edit_obj_table)
+        sb.obj_tv.bind("<Double-1>", self._edit_obj_table)
 
+        # Measurement Way 1 — table selection
+        sb.meas_tv.bind("<<TreeviewSelect>>", self._on_way1_select)
+
+        # Measurement Way 2 — map pick
+        sb.btn_map_measure.config(command=self._toggle_map_measure)
+        sb.btn_clear_meas.config( command=self._clear_map_measure)
+
+        # Map
         self.map_panel.map_w.add_right_click_menu_command(
             "📐  Add object here",
             self._rcm_add_obj, pass_coords=True)
         self.map_panel.map_w.add_right_click_menu_command(
             "✥   Move selected object here",
             self._rcm_move_obj, pass_coords=True)
+        self.map_panel.map_w.add_left_click_map_command(
+            self._on_map_left_click)
+
+        self.root.bind("<Escape>", lambda _e: self._on_escape())
 
     # ── Helpers ───────────────────────────────────────────────────────────────
     def _set_status(self, msg): self._status.set(msg)
@@ -104,7 +133,8 @@ class PathViewerApp:
     def _n_kp(self):
         return sum(len(pd["keypoints"]) for pd in self.paths if pd["visible"])
 
-    def _all_items(self):
+    def _all_meas_items(self):
+        """All items shown in the Way-1 measurement table."""
         items = []
         for pd in self.paths:
             if pd["visible"]: items.extend(pd["keypoints"])
@@ -121,6 +151,23 @@ class PathViewerApp:
         if 0 <= self.active_idx < len(self.paths):
             return self.paths[self.active_idx]
         return None
+
+    def _result_text(self, la1, lo1, la2, lo2, label1="A", label2="B"):
+        """Build a formatted distance result string."""
+        geo_d = haversine(la1, lo1, la2, lo2)
+        lines = [f"{label1}  ↔  {label2}",
+                 f"  Geo distance :  {geo_d:.3f} m"]
+        ref = self._get_ref_path()
+        if ref:
+            x1, y1 = latlon_to_local(la1, lo1,
+                                     ref["lat0"], ref["lon0"], ref["bearing"])
+            x2, y2 = latlon_to_local(la2, lo2,
+                                     ref["lat0"], ref["lon0"], ref["bearing"])
+            ld = math.sqrt((x2-x1)**2 + (y2-y1)**2)
+            lines += [f"  Local XY dist :  {ld:.3f} m",
+                      f"  ΔX = {x2-x1:+.3f} m   ΔY = {y2-y1:+.3f} m",
+                      f"  (ref: {ref['name']})"]
+        return "\n".join(lines)
 
     # ── File loading ──────────────────────────────────────────────────────────
     def _pick_file(self):
@@ -161,7 +208,8 @@ class PathViewerApp:
         self.sidebar.show_ref_coords(self._ref_path)
 
         self.map_panel.draw_path(pd)
-        self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
+        self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
+
         if fit:
             self.map_panel.fit_to_coords(
                 [(kp["lat"], kp["lon"]) for kp in pd["keypoints"]])
@@ -172,7 +220,6 @@ class PathViewerApp:
             if pd["name"] == name:
                 self._ref_path = pd; break
         self.sidebar.show_ref_coords(self._ref_path)
-        self._update_details()
 
     # ── Path list management ──────────────────────────────────────────────────
     def _on_path_select(self, _e=None):
@@ -191,10 +238,10 @@ class PathViewerApp:
         except (ValueError, IndexError): return
         pd = self.paths[idx]
         pd["visible"] = not pd["visible"]
-        (self.map_panel.draw_path if pd["visible"] else
-         self.map_panel.erase_path)(pd)
+        (self.map_panel.draw_path if pd["visible"]
+         else self.map_panel.erase_path)(pd)
         self.sidebar.refresh_path_list(self.paths, self.active_idx)
-        self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
+        self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
 
     def _remove_path(self):
         sel = self.sidebar.path_tv.selection()
@@ -210,7 +257,7 @@ class PathViewerApp:
             self.paths, self.sidebar.ref_origin_var.get(),
             self._on_ref_origin_change)
         self.sidebar.show_ref_coords(self._get_ref_path())
-        self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
+        self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
         if self.active_idx >= 0:
             self.sidebar.show_path_fields(self.paths[self.active_idx])
         else:
@@ -226,42 +273,28 @@ class PathViewerApp:
         pd = self._active_pd()
         if pd is None:
             messagebox.showwarning("No path selected",
-                                   "Select a path in the list first.")
-            return
+                                   "Select a path in the list first."); return
         sb = self.sidebar
         try:
-            # 1. Direct origin edit
             pd["lat0"]    = float(sb.var_sel_lat.get())
             pd["lon0"]    = float(sb.var_sel_lon.get())
             pd["bearing"] = float(sb.var_sel_bearing.get())
             pd["alt0"]    = float(sb.var_sel_alt.get())
-
-            # 2. Incremental shift (ΔX, ΔY in the path's local frame)
-            dx = float(sb.var_dx.get())
-            dy = float(sb.var_dy.get())
+            dx = float(sb.var_dx.get()); dy = float(sb.var_dy.get())
             if dx != 0 or dy != 0:
                 pd["lat0"], pd["lon0"] = local_to_latlon(
                     dx, dy, pd["lat0"], pd["lon0"], pd["bearing"])
-
-            # 3. Incremental rotation around origin
             dbrg = float(sb.var_dbrg.get())
             if dbrg != 0:
                 pd["bearing"] = (pd["bearing"] + dbrg) % 360.0
-
         except ValueError:
             messagebox.showerror("Invalid value",
-                                 "All transform fields must be numbers.")
-            return
-
-        # Refresh display fields (shows updated values, clears deltas)
+                                 "All transform fields must be numbers."); return
         self.sidebar.show_path_fields(pd)
-
-        # Redraw path + update reference coords if this is the ref
         self.map_panel.draw_path(pd)
-        self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
+        self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
         if self._ref_path and self._ref_path["name"] == pd["name"]:
             self.sidebar.show_ref_coords(pd)
-        self._update_details()
         self._set_status(
             f"{pd['name']} — origin updated  "
             f"({pd['lat0']:.6f}°, {pd['lon0']:.6f}°  brg {pd['bearing']:.2f}°)")
@@ -275,13 +308,12 @@ class PathViewerApp:
         pd["bearing"] = pd["orig_bearing"]
         self.sidebar.show_path_fields(pd)
         self.map_panel.draw_path(pd)
-        self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
+        self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
         if self._ref_path and self._ref_path["name"] == pd["name"]:
             self.sidebar.show_ref_coords(pd)
-        self._update_details()
         self._set_status(f"{pd['name']} — reset to original file values")
 
-    # ── Object type selection ─────────────────────────────────────────────────
+    # ── Object type dropdown ──────────────────────────────────────────────────
     _OBJ_HINTS = {
         "Point":     "right-click map to place",
         "Line":      "right-click: 1st = start,  2nd = end",
@@ -292,7 +324,7 @@ class PathViewerApp:
         self._cancel_line_pending()
         self.sidebar.set_obj_hint(self._OBJ_HINTS.get(val, ""))
 
-    # ── Right-click map handlers ──────────────────────────────────────────────
+    # ── Right-click map ───────────────────────────────────────────────────────
     def _rcm_add_obj(self, coords):
         lat, lon = coords
         t = self.sidebar.obj_type_var.get()
@@ -302,8 +334,7 @@ class PathViewerApp:
 
     def _rcm_move_obj(self, coords):
         if self._sel_obj_idx is None:
-            self._set_status("Select an object first (click its marker or table row)")
-            return
+            self._set_status("Select an object first"); return
         lat, lon = coords
         obj = self.custom_objs[self._sel_obj_idx]
         if obj["type"] == "point":
@@ -316,12 +347,132 @@ class PathViewerApp:
         elif obj["type"] == "rect":
             obj["clat"] = lat; obj["clon"] = lon
         self.map_panel.draw_obj(obj, on_click=self._obj_marker_clicked)
-        self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
+        self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
         self._sel_obj_idx = None
-        self._update_details()
         self._set_status("Object moved  ✓")
 
-    # ── Custom object creation ────────────────────────────────────────────────
+    # ── Left-click map → Way 2 ────────────────────────────────────────────────
+    def _on_map_left_click(self, coords):
+        if not self._meas_mode:
+            return
+        lat, lon = coords
+        if self._meas_a is None:
+            # Place A
+            self._meas_a   = (lat, lon)
+            self._meas_mk_a = self.map_panel.set_measure_pin(lat, lon, "A", "A")
+            self.sidebar.lbl_pt_a.config(
+                text=f"  A :  {lat:.6f}°,  {lon:.6f}°",
+                foreground=ACCENT)
+            self._set_status("Map measure: left-click to set point B")
+        elif self._meas_b is None:
+            # Place B → compute result
+            self._meas_b   = (lat, lon)
+            self._meas_mk_b = self.map_panel.set_measure_pin(lat, lon, "B", "B")
+            self.sidebar.lbl_pt_b.config(
+                text=f"  B :  {lat:.6f}°,  {lon:.6f}°",
+                foreground="#f5c518")
+            la1, lo1 = self._meas_a
+            self.sidebar.show_result(
+                self._result_text(la1, lo1, lat, lon, "A", "B"),
+                ACCENT, FONT_BOLD)
+            self._set_status("Map measure: result shown  |  click to reset  |  Esc to exit")
+        else:
+            # Third click → clear and start over
+            self._clear_meas_pins()
+            self._meas_a   = (lat, lon)
+            self._meas_mk_a = self.map_panel.set_measure_pin(lat, lon, "A", "A")
+            self.sidebar.lbl_pt_a.config(
+                text=f"  A :  {lat:.6f}°,  {lon:.6f}°",
+                foreground=ACCENT)
+            self.sidebar.lbl_pt_b.config(text="  B :  —", foreground=DIM)
+            self.sidebar.show_result(
+                "—  set 2 points or select 2 objects  —", DIM)
+            self._set_status("Map measure: left-click to set point B")
+
+    # ── Way 2 mode controls ───────────────────────────────────────────────────
+    def _toggle_map_measure(self):
+        if self._meas_mode:
+            self._stop_map_measure()
+        else:
+            self._start_map_measure()
+
+    def _start_map_measure(self):
+        self._meas_mode = True
+        self.sidebar.btn_map_measure.config(text="■ Stop picking")
+        self._set_status("Map measure ON — left-click to set point A")
+
+    def _stop_map_measure(self):
+        self._meas_mode = False
+        self.sidebar.btn_map_measure.config(text="📏 Start picking")
+        self._set_status("Map measure off")
+
+    def _clear_meas_pins(self):
+        for mk in (self._meas_mk_a, self._meas_mk_b):
+            if mk:
+                try: mk.delete()
+                except Exception: pass
+        self._meas_mk_a = self._meas_mk_b = None
+        self._meas_a    = self._meas_b    = None
+
+    def _clear_map_measure(self):
+        self._clear_meas_pins()
+        self._stop_map_measure()
+        self.sidebar.lbl_pt_a.config(text="  A :  —", foreground=DIM)
+        self.sidebar.lbl_pt_b.config(text="  B :  —", foreground=DIM)
+        self.sidebar.show_result(
+            "—  set 2 points or select 2 objects  —", DIM)
+
+    def _on_escape(self):
+        if self._meas_mode:
+            self._clear_map_measure()
+        elif self._line_pending:
+            self._cancel_line_pending()
+
+    # ── Measurement Way 1 — table selection ───────────────────────────────────
+    def _on_way1_select(self, _e=None):
+        sel   = self.sidebar.meas_tv.selection()
+        items = self._all_meas_items()
+        rows  = list(self.sidebar.meas_tv.get_children())
+
+        if len(sel) == 2:
+            idx = [rows.index(s) for s in sel]
+            if any(i >= len(items) for i in idx): return
+            it1, it2 = items[idx[0]], items[idx[1]]
+            la1, lo1 = item_rep(it1)
+            la2, lo2 = item_rep(it2)
+            self.sidebar.show_result(
+                self._result_text(la1, lo1, la2, lo2,
+                                  it1.get("name","?"), it2.get("name","?")),
+                ACCENT, FONT_BOLD)
+        elif len(sel) == 1:
+            i = rows.index(sel[0])
+            if i >= len(items): return
+            it  = items[i]
+            lat, lon = item_rep(it)
+            ref = self._get_ref_path()
+            lines = [f"{OBJ_ICON.get(it.get('type',''),'■')}  {it.get('name','?')}",
+                     f"  Lat  {lat:.6f}°",
+                     f"  Lon  {lon:.6f}°"]
+            t = it.get("type")
+            if t == "line":
+                d = haversine(it["lat1"],it["lon1"],it["lat2"],it["lon2"])
+                lines.append(f"  L = {d:.3f} m   hdg {it.get('heading',0):.1f}°")
+            elif t == "rect":
+                lines.append(
+                    f"  {it['width_m']:.2f} × {it['height_m']:.2f} m"
+                    f"   hdg {it.get('heading',0):.1f}°")
+            if ref:
+                x, y = latlon_to_local(lat, lon,
+                                       ref["lat0"], ref["lon0"], ref["bearing"])
+                lines += [f"  X = {x:+.3f} m     Y = {y:+.3f} m",
+                          f"  (ref: {ref['name']})"]
+            self.sidebar.show_result(
+                "\n".join(l for l in lines if l), ACCENT, FONT_BODY)
+        else:
+            self.sidebar.show_result(
+                "—  set 2 points or select 2 objects  —", DIM)
+
+    # ── Object creation ───────────────────────────────────────────────────────
     def _default_name(self, typ):
         n = sum(1 for o in self.custom_objs if o["type"] == typ) + 1
         return f"{typ[0].upper()}{n}"
@@ -336,7 +487,7 @@ class PathViewerApp:
                "lat": lat, "lon": lon, "_markers":[], "_paths":[]}
         self.custom_objs.append(obj)
         self.map_panel.draw_obj(obj, on_click=self._obj_marker_clicked)
-        self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
+        self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
         self._set_status(f"Point '{obj['name']}' added")
 
     def _add_line(self, lat1, lon1, lat2, lon2):
@@ -351,7 +502,7 @@ class PathViewerApp:
                "heading": round(h,2), "_markers":[], "_paths":[]}
         self.custom_objs.append(obj)
         self.map_panel.draw_obj(obj, on_click=self._obj_marker_clicked)
-        self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
+        self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
         d = haversine(lat1, lon1, lat2, lon2)
         self._set_status(f"Line '{obj['name']}'  {d:.2f} m  hdg {h:.1f}°")
 
@@ -386,155 +537,96 @@ class PathViewerApp:
         if obj is None: return
         self.custom_objs.append(obj)
         self.map_panel.draw_obj(obj, on_click=self._obj_marker_clicked)
-        self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
+        self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
         self._set_status(
             f"Rectangle '{obj['name']}'  "
-            f"{obj['width_m']}×{obj['height_m']} m  "
-            f"hdg {obj['heading']:.1f}°")
+            f"{obj['width_m']}×{obj['height_m']} m  hdg {obj['heading']:.1f}°")
 
     # ── Object editing / removal ──────────────────────────────────────────────
     def _obj_marker_clicked(self, obj):
-        idx   = self.custom_objs.index(obj)
-        rows  = self.sidebar.meas_tv.get_children()
-        row_i = self._n_kp() + idx
-        if row_i < len(rows):
-            self.sidebar.meas_tv.selection_set(rows[row_i])
-            self.sidebar.meas_tv.see(rows[row_i])
-        self._sel_obj_idx = idx
-        self._update_details()
-        self._set_status(f"'{obj['name']}' selected")
+        """Select the object in the obj_tv when its map marker is clicked."""
+        rows  = list(self.sidebar.obj_tv.get_children())
+        try:
+            ci = self.custom_objs.index(obj)
+            if ci < len(rows):
+                self.sidebar.obj_tv.selection_set(rows[ci])
+                self.sidebar.obj_tv.see(rows[ci])
+        except ValueError:
+            pass
+        self._sel_obj_idx = self.custom_objs.index(obj) if obj in self.custom_objs else None
 
-    def _get_selected_custom_obj(self):
-        sel  = self.sidebar.meas_tv.selection()
+    def _get_selected_obj(self):
+        sel = self.sidebar.obj_tv.selection()
         if not sel: return None
-        rows = list(self.sidebar.meas_tv.get_children())
+        rows = list(self.sidebar.obj_tv.get_children())
         i    = rows.index(sel[0])
-        n_kp = self._n_kp()
-        return self.custom_objs[i - n_kp] if i >= n_kp else None
+        return self.custom_objs[i] if i < len(self.custom_objs) else None
 
     def _edit_obj_btn(self):
-        obj = self._get_selected_custom_obj()
+        obj = self._get_selected_obj()
         if obj is None:
             messagebox.showinfo("Nothing to edit",
-                                "Select a custom object row in the table.")
-            return
+                                "Select an object in the Objects list."); return
         if edit_obj(self.root, obj):
             self.map_panel.draw_obj(obj, on_click=self._obj_marker_clicked)
-            self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
-            self._update_details()
+            self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
 
     def _edit_obj_table(self, _e=None):
-        obj = self._get_selected_custom_obj()
+        obj = self._get_selected_obj()
         if obj and edit_obj(self.root, obj):
             self.map_panel.draw_obj(obj, on_click=self._obj_marker_clicked)
-            self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
-            self._update_details()
+            self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
 
     def _start_move_mode(self):
-        sel  = self.sidebar.meas_tv.selection()
-        if not sel:
+        obj = self._get_selected_obj()
+        if obj is None:
             messagebox.showinfo("Nothing selected",
-                                "Select a custom object first."); return
-        rows = list(self.sidebar.meas_tv.get_children())
-        i    = rows.index(sel[0])
-        if i < self._n_kp():
-            messagebox.showinfo("Path keypoint",
-                                "Path keypoints cannot be moved here."); return
-        self._sel_obj_idx = i - self._n_kp()
+                                "Select an object first."); return
+        self._sel_obj_idx = self.custom_objs.index(obj)
         self._set_status(
-            f"Move mode — right-click map to place  "
-            f"'{self.custom_objs[self._sel_obj_idx]['name']}'")
+            f"Move mode — right-click map to place  '{obj['name']}'")
 
     def _remove_obj(self):
-        sel  = self.sidebar.meas_tv.selection()
+        sel  = self.sidebar.obj_tv.selection()
         if not sel: return
-        rows = list(self.sidebar.meas_tv.get_children())
-        n_kp = self._n_kp()
-        to_rm = sorted(
-            [rows.index(s) - n_kp for s in sel if rows.index(s) >= n_kp],
-            reverse=True)
+        rows = list(self.sidebar.obj_tv.get_children())
+        to_rm = sorted([rows.index(s) for s in sel], reverse=True)
         for ci in to_rm:
-            self.map_panel.erase_obj(self.custom_objs[ci])
-            self.custom_objs.pop(ci)
-        if self._sel_obj_idx is not None and \
-                self._sel_obj_idx >= len(self.custom_objs):
+            if ci < len(self.custom_objs):
+                self.map_panel.erase_obj(self.custom_objs[ci])
+                self.custom_objs.pop(ci)
+        if (self._sel_obj_idx is not None and
+                self._sel_obj_idx >= len(self.custom_objs)):
             self._sel_obj_idx = None
-        self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
-        self._update_details()
+        self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
 
     def _clear_custom_objs(self):
         for obj in self.custom_objs: self.map_panel.erase_obj(obj)
         self.custom_objs.clear()
         self._sel_obj_idx = None
-        self.sidebar.refresh_meas_table(self.paths, self.custom_objs)
-        self.sidebar.show_details(
-            "—  select an object for coordinates\n"
-            "—  select two for distance", DIM)
+        self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
 
-    # ── Details panel ─────────────────────────────────────────────────────────
-    def _on_meas_select(self, _e=None):
-        self._update_details()
-
-    def _update_details(self):
-        sel   = self.sidebar.meas_tv.selection()
-        items = self._all_items()
-        rows  = list(self.sidebar.meas_tv.get_children())
-        ref   = self._get_ref_path()
-
-        def _rel(lat, lon):
-            if ref is None: return ""
-            x, y = latlon_to_local(
-                lat, lon, ref["lat0"], ref["lon0"], ref["bearing"])
-            return (f"\n  X = {x:+.3f} m     Y = {y:+.3f} m"
-                    f"\n  (ref: {ref['name']})")
-
-        if len(sel) == 0:
-            self.sidebar.show_details(
-                "—  select an object for coordinates\n"
-                "—  select two for distance", DIM)
-            return
-
-        if len(sel) == 1:
-            i = rows.index(sel[0])
-            if i >= len(items): return
-            it  = items[i]
-            lat, lon = item_rep(it)
-            name = it.get("name","?")
-            icon = OBJ_ICON.get(it.get("type",""), "■")
-            lines = [f"{icon}  {name}",
-                     f"  Lat  {lat:.6f}°",
-                     f"  Lon  {lon:.6f}°"]
-            t = it.get("type")
-            if t == "line":
-                d = haversine(it["lat1"],it["lon1"],it["lat2"],it["lon2"])
-                lines.append(f"  L = {d:.3f} m   hdg {it.get('heading',0):.1f}°")
-            elif t == "rect":
-                lines.append(
-                    f"  {it['width_m']:.2f} × {it['height_m']:.2f} m"
-                    f"   hdg {it.get('heading',0):.1f}°")
-            lines.append(_rel(lat, lon))
-            self.sidebar.show_details(
-                "\n".join(l for l in lines if l), ACCENT, FONT_BODY)
-            return
-
-        if len(sel) == 2:
-            idx = [rows.index(s) for s in sel]
-            if any(i >= len(items) for i in idx): return
-            it1, it2 = items[idx[0]], items[idx[1]]
-            la1, lo1 = item_rep(it1)
-            la2, lo2 = item_rep(it2)
-            geo_d    = haversine(la1, lo1, la2, lo2)
-            lines = [f"{it1.get('name','?')}  ↔  {it2.get('name','?')}",
-                     f"  Geo distance :  {geo_d:.3f} m"]
-            if ref:
-                x1,y1 = latlon_to_local(la1,lo1,ref["lat0"],ref["lon0"],ref["bearing"])
-                x2,y2 = latlon_to_local(la2,lo2,ref["lat0"],ref["lon0"],ref["bearing"])
-                ld    = math.sqrt((x2-x1)**2+(y2-y1)**2)
-                lines += [f"  Local XY dist:  {ld:.3f} m",
-                          f"  ΔX = {x2-x1:+.3f} m   ΔY = {y2-y1:+.3f} m",
-                          f"  (ref: {ref['name']})"]
-            self.sidebar.show_details("\n".join(lines), ACCENT, FONT_BOLD)
-            return
-
-        self.sidebar.show_details(
-            f"{len(sel)} objects selected — select exactly 2 to measure", DIM)
+    # ── Reset map ─────────────────────────────────────────────────────────────
+    def reset_map(self):
+        if self.paths or self.custom_objs:
+            if not messagebox.askyesno(
+                    "Reset map",
+                    "Remove all loaded paths and measurement objects?"):
+                return
+        self._clear_map_measure()
+        for obj in self.custom_objs: self.map_panel.erase_obj(obj)
+        self.custom_objs.clear()
+        for pd in self.paths: self.map_panel.erase_path(pd)
+        self.paths.clear()
+        self.active_idx  = -1
+        self._ref_path   = None
+        self._sel_obj_idx = None
+        self._cancel_line_pending()
+        self.sidebar.refresh_path_list([], -1)
+        self.sidebar.clear_path_fields()
+        self.sidebar.rebuild_ref_menu([], "— none —", lambda _: None)
+        self.sidebar.show_ref_coords(None)
+        self.sidebar.refresh_obj_table([], [])
+        self.sidebar.show_result(
+            "—  set 2 points or select 2 objects  —", DIM)
+        self._set_status("Map reset")

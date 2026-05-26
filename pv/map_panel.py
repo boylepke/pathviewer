@@ -1,10 +1,8 @@
 """
 pv/map_panel.py
 ───────────────
-MapPanel class: builds the map widget + tile toolbar and provides
-draw / erase methods for paths and custom measurement objects.
-Drawing mutates the '_markers' / '_paths' / '_line' / 'keypoints'
-fields inside the data dicts passed in.
+MapPanel: satellite map widget + draw / erase methods for paths and objects.
+No highlight system — measurement is handled purely through the sidebar.
 """
 import tkinter as tk
 from tkinter import ttk
@@ -13,20 +11,23 @@ try:
     import tkintermapview
 except ImportError:
     import sys, subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "tkintermapview"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install",
+                           "tkintermapview"])
     import tkintermapview
 
-from .constants import (BG, CARD, BORDER, ACCENT2, TEXT, DIM,
-                        YELLOW, FONT_BODY, TILE_SERVERS, OBJ_ICON)
+from .constants import (BG, CARD, BORDER, ACCENT, ACCENT2,
+                        TEXT, DIM, YELLOW, FONT_BODY,
+                        TILE_SERVERS, OBJ_ICON)
 from .geo import local_to_latlon, rect_corners
 from .models import _n
 
+# Colours for the two temporary map-measure pins
+_PIN_A = "#00d4ff"   # cyan  — Point A
+_PIN_B = "#f5c518"   # amber — Point B
+
 
 class MapPanel:
-    """
-    Public attribute:
-        map_w — the TkinterMapView widget (for direct event binding)
-    """
+    """Public attribute: map_w — the TkinterMapView widget."""
 
     def __init__(self, host):
         self._build(host)
@@ -35,7 +36,6 @@ class MapPanel:
     def _build(self, host):
         ctrl = tk.Frame(host, bg=BG, height=34)
         ctrl.pack(fill="x"); ctrl.pack_propagate(False)
-
         tk.Label(ctrl, text="Tile layer:", bg=BG, fg=DIM,
                  font=FONT_BODY).pack(side="left", padx=(8, 2))
         self._tile_var = tk.StringVar(value="Satellite")
@@ -89,11 +89,11 @@ class MapPanel:
             seen.add(key)
             coords.append(local_to_latlon(s["x"], s["y"], lat0, lon0, bearing))
 
-        root_el  = pd["xml_tree"].getroot()
-        ep       = root_el.find(_n("Header") + "/" + _n("EndPoint"))
-        ep_lat   = ep_lon = None
+        root_el = pd["xml_tree"].getroot()
+        ep      = root_el.find(_n("Header") + "/" + _n("EndPoint"))
+        ep_lat  = ep_lon = None
         if ep is not None:
-            ex, ey   = float(ep.get("x", 0)), float(ep.get("y", 0))
+            ex, ey  = float(ep.get("x", 0)), float(ep.get("y", 0))
             ep_lat, ep_lon = local_to_latlon(ex, ey, lat0, lon0, bearing)
             if (round(ex, 4), round(ey, 4)) not in seen:
                 coords.append((ep_lat, ep_lon))
@@ -103,10 +103,11 @@ class MapPanel:
 
         def mk(lat, lon, name, label):
             m = self.map_w.set_marker(lat, lon, text=label,
-                marker_color_circle=color, marker_color_outside=color,
+                marker_color_circle=color,
+                marker_color_outside=color,
                 font=FONT_BODY)
-            pd["keypoints"].append(
-                {"name": name, "lat": lat, "lon": lon, "marker": m})
+            pd["keypoints"].append({"name": name, "lat": lat, "lon": lon,
+                                     "marker": m})
             pd["_markers"].append(m)
 
         mk(lat0, lon0, "Origin", "⊕ Origin")
@@ -133,7 +134,6 @@ class MapPanel:
         obj["_paths"]   = []
 
     def draw_obj(self, obj, on_click=None):
-        """Redraw obj on the map. on_click(obj) is called on marker click."""
         self.erase_obj(obj)
         col  = YELLOW
         icon = OBJ_ICON[obj["type"]]
@@ -141,27 +141,38 @@ class MapPanel:
         def mk(lat, lon, label):
             cb = (lambda _m, o=obj: on_click(o)) if on_click else None
             m  = self.map_w.set_marker(lat, lon, text=label,
-                marker_color_circle=col, marker_color_outside=col,
+                marker_color_circle=col,
+                marker_color_outside=col,
                 font=FONT_BODY, command=cb)
             obj["_markers"].append(m)
 
         if obj["type"] == "point":
             mk(obj["lat"], obj["lon"], f"{icon} {obj['name']}")
-
         elif obj["type"] == "line":
             mk(obj["lat1"], obj["lon1"], "")
             mk(obj["lat2"], obj["lon2"], f"{icon} {obj['name']}")
             obj["_paths"].append(self.map_w.set_path(
                 [(obj["lat1"], obj["lon1"]), (obj["lat2"], obj["lon2"])],
                 color=col, width=2))
-
         elif obj["type"] == "rect":
-            corners = rect_corners(obj["clat"], obj["clon"],
-                                   obj["width_m"], obj["height_m"],
-                                   obj.get("heading", 0.0))
+            corners = rect_corners(
+                obj["clat"], obj["clon"],
+                obj["width_m"], obj["height_m"],
+                obj.get("heading", 0.0))
             obj["_paths"].append(
-                self.map_w.set_path(corners + [corners[0]], color=col, width=2))
+                self.map_w.set_path(corners + [corners[0]],
+                                    color=col, width=2))
             mk(obj["clat"], obj["clon"], f"{icon} {obj['name']}")
+
+    # ── Map-measure pins (Way 2) ──────────────────────────────────────────────
+    def set_measure_pin(self, lat, lon, label, which="A"):
+        """Place a temporary measurement pin. Returns the marker object."""
+        color = _PIN_A if which == "A" else _PIN_B
+        return self.map_w.set_marker(lat, lon,
+            text=f"  {which}",
+            marker_color_circle=color,
+            marker_color_outside=color,
+            font=("Consolas", 9, "bold"))
 
     # ── Viewport helpers ──────────────────────────────────────────────────────
     def fit_to_coords(self, coords, zoom=18):
