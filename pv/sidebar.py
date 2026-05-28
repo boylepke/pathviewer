@@ -147,7 +147,9 @@ class Sidebar:
         self.btn_cancel_line = ttk.Button(top, text="✕ Cancel",
                                            command=lambda: None)
 
-        self.obj_tv = ttk.Treeview(f, columns=("typ","name","info"),
+        _obj_frame = ttk.Frame(f)
+        _obj_frame.pack(fill="x", padx=12, pady=2)
+        self.obj_tv = ttk.Treeview(_obj_frame, columns=("typ","name","info"),
                                     show="headings", height=6,
                                     selectmode="browse")
         self.obj_tv.heading("typ",  text="")
@@ -156,7 +158,11 @@ class Sidebar:
         self.obj_tv.column("typ",  width=24,  anchor="center", stretch=False)
         self.obj_tv.column("name", width=80,  anchor="w",      stretch=False)
         self.obj_tv.column("info", width=165, anchor="w",      stretch=True)
-        self.obj_tv.pack(fill="x", **p)
+        _obj_sb = ttk.Scrollbar(_obj_frame, orient="vertical",
+                                command=self.obj_tv.yview)
+        self.obj_tv.configure(yscrollcommand=_obj_sb.set)
+        self.obj_tv.pack(side="left", fill="both", expand=True)
+        _obj_sb.pack(side="right", fill="y")
 
         mr = ttk.Frame(f); mr.pack(fill="x", padx=12, pady=2)
         self.btn_edit_obj   = ttk.Button(mr, text="✏ Edit",    command=lambda: None)
@@ -177,7 +183,9 @@ class Sidebar:
                   style="Dim.TLabel", wraplength=295).pack(
                   anchor="w", padx=12, pady=(2,2))
 
-        self.meas_tv = ttk.Treeview(f, columns=("typ","name","info"),
+        _meas_frame = ttk.Frame(f)
+        _meas_frame.pack(fill="x", padx=12, pady=2)
+        self.meas_tv = ttk.Treeview(_meas_frame, columns=("typ","name","info"),
                                      show="headings", height=6,
                                      selectmode="extended")
         self.meas_tv.heading("typ",  text="")
@@ -186,7 +194,11 @@ class Sidebar:
         self.meas_tv.column("typ",  width=24,  anchor="center", stretch=False)
         self.meas_tv.column("name", width=80,  anchor="w",      stretch=False)
         self.meas_tv.column("info", width=165, anchor="w",      stretch=True)
-        self.meas_tv.pack(fill="x", **p)
+        _meas_sb = ttk.Scrollbar(_meas_frame, orient="vertical",
+                                  command=self.meas_tv.yview)
+        self.meas_tv.configure(yscrollcommand=_meas_sb.set)
+        self.meas_tv.pack(side="left", fill="both", expand=True)
+        _meas_sb.pack(side="right", fill="y")
 
         # Way 2
         self._subsec(f, "Way 2 — pick 2 points on the map")

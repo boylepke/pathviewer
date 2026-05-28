@@ -7,7 +7,7 @@ Measurement Way 1: select 2 rows from the measurement table → distance shown.
 Measurement Way 2: "Pick on map" mode → left-click A, left-click B → distance.
 """
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import ttk, filedialog, messagebox
 import xml.etree.ElementTree as ET
 import math
 import os
@@ -18,7 +18,7 @@ from .geo       import (local_to_latlon, latlon_to_local,
                          heading_between, haversine)
 from .models    import (new_path_dict, parse_path, item_rep, NS)
 from .styles    import apply_styles
-from .dialogs   import ask_rect_params, edit_obj
+from .dialogs   import ask_point_params, ask_line_params, ask_rect_params, edit_obj
 from .sidebar   import Sidebar
 from .map_panel import MapPanel
 
@@ -478,33 +478,26 @@ class PathViewerApp:
         return f"{typ[0].upper()}{n}"
 
     def _add_point(self, lat, lon):
-        name = simpledialog.askstring(
-            "Point", "Name:",
-            initialvalue=self._default_name("point"), parent=self.root)
-        if name is None: return
-        obj = {"type":"point",
-               "name": name.strip() or self._default_name("point"),
-               "lat": lat, "lon": lon, "_markers":[], "_paths":[]}
+        obj = ask_point_params(self.root, lat, lon,
+                               self._default_name("point"),
+                               ref_path=self._get_ref_path())
+        if obj is None: return
         self.custom_objs.append(obj)
         self.map_panel.draw_obj(obj, on_click=self._obj_marker_clicked)
         self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
         self._set_status(f"Point '{obj['name']}' added")
 
     def _add_line(self, lat1, lon1, lat2, lon2):
-        name = simpledialog.askstring(
-            "Line", "Name:",
-            initialvalue=self._default_name("line"), parent=self.root)
-        if name is None: return
-        h   = heading_between(lat1, lon1, lat2, lon2)
-        obj = {"type":"line",
-               "name": name.strip() or self._default_name("line"),
-               "lat1":lat1,"lon1":lon1,"lat2":lat2,"lon2":lon2,
-               "heading": round(h,2), "_markers":[], "_paths":[]}
+        obj = ask_line_params(self.root, lat1, lon1, lat2, lon2,
+                              self._default_name("line"),
+                              ref_path=self._get_ref_path())
+        if obj is None: return
         self.custom_objs.append(obj)
         self.map_panel.draw_obj(obj, on_click=self._obj_marker_clicked)
         self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
-        d = haversine(lat1, lon1, lat2, lon2)
-        self._set_status(f"Line '{obj['name']}'  {d:.2f} m  hdg {h:.1f}°")
+        d = haversine(obj["lat1"],obj["lon1"],obj["lat2"],obj["lon2"])
+        self._set_status(
+            f"Line '{obj['name']}'  {d:.2f} m  hdg {obj['heading']:.1f}°")
 
     def _line_click(self, lat, lon):
         if self._line_pending is None:
@@ -533,7 +526,8 @@ class PathViewerApp:
             self._OBJ_HINTS.get(self.sidebar.obj_type_var.get(), ""))
 
     def _open_rect_dialog(self, clat, clon):
-        obj = ask_rect_params(self.root, clat, clon, self._default_name("rect"))
+        obj = ask_rect_params(self.root, clat, clon, self._default_name("rect"),
+                              ref_path=self._get_ref_path())
         if obj is None: return
         self.custom_objs.append(obj)
         self.map_panel.draw_obj(obj, on_click=self._obj_marker_clicked)
@@ -567,13 +561,13 @@ class PathViewerApp:
         if obj is None:
             messagebox.showinfo("Nothing to edit",
                                 "Select an object in the Objects list."); return
-        if edit_obj(self.root, obj):
+        if edit_obj(self.root, obj, ref_path=self._get_ref_path()):
             self.map_panel.draw_obj(obj, on_click=self._obj_marker_clicked)
             self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
 
     def _edit_obj_table(self, _e=None):
         obj = self._get_selected_obj()
-        if obj and edit_obj(self.root, obj):
+        if obj and edit_obj(self.root, obj, ref_path=self._get_ref_path()):
             self.map_panel.draw_obj(obj, on_click=self._obj_marker_clicked)
             self.sidebar.refresh_obj_table(self.paths, self.custom_objs)
 
